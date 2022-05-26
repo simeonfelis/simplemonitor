@@ -232,7 +232,38 @@ class Alerter:
         return True
 
     def should_alert(self, monitor: Monitor) -> AlertType:
-        """Check if we should bother alerting, and what type."""
+        """Check if we should bother alerting, and what type.
+        
+        types: NONE, CATCHUP, FAILURE, SUCCESS
+        
+        all inputs are boolean
+        inputs: enabled, group_match, urgent, ooh, failed, repeat,
+                catchup,
+                limit_reached, recovered, alerted, ooh_recovery,
+                only_failures
+        
+        enabled = self.enabled
+        group_match = check_group_match(...)
+        urgent = self.urgent and monitor.urgent
+        
+        failed = vfc > 0
+
+        ioh = check if ooh is set, and if our (if configured, local) time is inside ooh
+        limit_reached = vfc == _limit
+        repeat = (vfc % _repeat) == 0
+        catchup = check if we were muted during ooh times
+        --> http://www.32x8.com/pos4_____A-B-C-D_____m_9-10-11-12-13-14-15___________option-3_____898798975571822592658
+        
+        recovered = all_better_now
+
+        ioh (see above)
+        alerted = last_vfc >= _limit
+        ooh_recovery
+        only_failures
+        
+        --> http://www.32x8.com/pos4_____A-B-C-D_____m_6-12-14___________option-3_____999795966471843393791
+        
+        """
         out_of_hours = False
 
         if not check_group_match(monitor.group, self.groups):
@@ -262,12 +293,36 @@ class Alerter:
             out_of_hours = True
 
         if not self._allowed_time():
-            out_of_hours = True
+            out_of_hours &= True
+        
+        is_ioh = out_of_hours
+        is_vfc = monitor.virtual_fail_count() > 0
+        def get_limit_reached():
+            vfc = monitor.virtual_fail_count()
+            if vfc == self._limit:
+                return True
+            return False
+        def get_repeat():
+            vfc = monitor.virtual_fail_count()
+            if vfc > 0 and self._repeat and (vfc % self._limit == 0):
+                return True
+            
+        is_limit_reached = get_limit_reached()
+        is_repeat = get_repeat()
 
         # ensure OOH list is initalised to the empty list if not done
         if self._ooh_failures is None:
             self._ooh_failures = []
 
+        is_catchup = monitor.name in self._ooh_failures
+
+        def check_type_alert(is_vfc, is_ioh, is_limit_reached, is_repeat, is_catchup):
+            a, b, c, d, e = is_vfc, is_ioh, is_limit_reached, is_repeat, is_catchup
+            return a & b & (c | d | e)
+        is_type_alert = check_type_alert(is_vfc, is_ioh, is_limit_reached, is_repeat, is_catchup)
+
+        is_type_success = check_type_success()
+            
         virtual_failure_count = monitor.virtual_fail_count()
 
         if virtual_failure_count:
@@ -346,6 +401,8 @@ class Alerter:
 
     def _allowed_today(self) -> bool:
         """Check if today is an allowed day for an alert."""
+        if self._times_type == AlertTimeFilter.ALWAYS:
+            return True
         if arrow.now(self._times_tz).weekday() not in self._days:
             self.alerter_logger.debug("not allowed to alert today")
             return False
