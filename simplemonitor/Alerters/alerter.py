@@ -252,16 +252,15 @@ class Alerter:
         limit_reached = vfc == _limit
         repeat = (vfc % _repeat) == 0
         catchup = check if we were muted during ooh times
-        --> http://www.32x8.com/pos4_____A-B-C-D_____m_9-10-11-12-13-14-15___________option-3_____898798975571822592658
         
         recovered = all_better_now
 
         ioh (see above)
         alerted = last_vfc >= _limit
-        ooh_recovery
+        ooh_recovery whether recovery messages are allowed during ooh
         only_failures
         
-        --> http://www.32x8.com/pos4_____A-B-C-D_____m_6-12-14___________option-3_____999795966471843393791
+        --> http://www.32x8.com/sop5_____A-B-C-D-E_____m_21-28-29___________option-0_____988684975178841793722
         
         """
         out_of_hours = False
@@ -280,6 +279,10 @@ class Alerter:
             self.alerter_logger.debug(
                 "not alerting for %s: monitor disabled", monitor.name
             )
+            try:
+                self._ooh_failures.remove(monitor.name)
+            except ValueError:
+                pass
             return AlertType.NONE
 
         if self.urgent and not monitor.urgent:
@@ -314,14 +317,128 @@ class Alerter:
         if self._ooh_failures is None:
             self._ooh_failures = []
 
-        is_catchup = monitor.name in self._ooh_failures
+        # True when monitor failed but did not alert because of ooh config
+        is_catchup = monitor.name in self._ooh_failures and self.support_catchup
 
-        def check_type_alert(is_vfc, is_ioh, is_limit_reached, is_repeat, is_catchup):
-            a, b, c, d, e = is_vfc, is_ioh, is_limit_reached, is_repeat, is_catchup
-            return a & b & (c | d | e)
+        def check_type_alert(is_vfc, is_ioh, is_limit_reached, is_repeat, catchup):
+            """
+            catchup shall be True when:
+             * implementor supports this
+             * this is an actual catchup
+            When catchup is True this returns always False
+            
+        --> http://www.32x8.com/sop5_____A-B-C-D-E_____m_25-26-27-28-29-30-31___________option-0_____899788965271827592681
+        
+|    |     A    |     B    |          C         |      D      |       E      |   Y   |
+|---:|:--------:|:--------:|:------------------:|:-----------:|:------------:|:-----:|
+|    | `is_vfc` | `is_ioh` | `is_limit_reached` | `is_repeat` | `catchup`    | Alert |
+|  0 |     0    |     0    |          0         |      0      |       0      |   0   |
+|  1 |     0    |     0    |          0         |      0      |       1      |   0   |
+|  2 |     0    |     0    |          0         |      1      |       0      |   0   |
+|  3 |     0    |     0    |          0         |      1      |       1      |   0   |
+|  4 |     0    |     0    |          1         |      0      |       0      |   0   |
+|  5 |     0    |     0    |          1         |      0      |       1      |   0   |
+|  6 |     0    |     0    |          1         |      1      |       0      |   0   |
+|  7 |     0    |     0    |          1         |      1      |       1      |   0   |
+|  8 |     0    |     1    |          0         |      0      |       0      |   0   |
+|  9 |     0    |     1    |          0         |      0      |       1      |   0   |
+| 10 |     0    |     1    |          0         |      1      |       0      |   0   |
+| 11 |     0    |     1    |          0         |      1      |       1      |   0   |
+| 12 |     0    |     1    |          1         |      0      |       0      |   0   |
+| 13 |     0    |     1    |          1         |      0      |       1      |   0   |
+| 14 |     0    |     1    |          1         |      1      |       0      |   0   |
+| 15 |     0    |     1    |          1         |      1      |       1      |   0   |
+| 16 |     1    |     0    |          0         |      0      |       0      |   0   |
+| 17 |     1    |     0    |          0         |      0      |       1      |   0   |
+| 18 |     1    |     0    |          0         |      1      |       0      |   0   |
+| 19 |     1    |     0    |          0         |      1      |       1      |   0   |
+| 20 |     1    |     0    |          1         |      0      |       0      |   0   |
+| 21 |     1    |     0    |          1         |      0      |       1      |   0   |
+| 22 |     1    |     0    |          1         |      1      |       0      |   0   |
+| 23 |     1    |     0    |          1         |      1      |       1      |   0   |
+| 24 |     1    |     1    |          0         |      0      |       0      |   0   |
+| 25 |     1    |     1    |          0         |      0      |       1      |   0   |
+| 26 |     1    |     1    |          0         |      1      |       0      |   1   |
+| 27 |     1    |     1    |          0         |      1      |       1      |   0   |
+| 28 |     1    |     1    |          1         |      0      |       0      |   1   |
+| 29 |     1    |     1    |          1         |      0      |       1      |   1   |
+| 30 |     1    |     1    |          1         |      1      |       0      |   0   |
+| 31 |     1    |     1    |          1         |      1      |       1      |   1   |
+            
+            y = ABCD' + ABCE + ABC'DE'
+            
+            """
+            a, b, c, d, e = is_vfc, is_ioh, is_limit_reached, is_repeat, catchup
+            return (a and b and c and not d) or (a and b and c and e) or (a and b and not c and d and not e)
         is_type_alert = check_type_alert(is_vfc, is_ioh, is_limit_reached, is_repeat, is_catchup)
 
-        is_type_success = check_type_success()
+        def check_type_success(is_recover, is_ioh, has_alerted, only_failures, ooh_recovery):
+            """
+            -> http://www.32x8.com/sop5_____A-B-C-D-E_____m_21-28-29___________option-0_____988684975178841793722
+            
+|    |     A    |     B    |          C         |      D      |       E      |   Y   |
+|---:|:--------:|:--------:|:------------------:|:-----------:|:------------:|:-----:|
+|    | `is_rec` | `is_ioh` | `has_alerted`      | `only_fail` | `ooh_recove` | SUCCE |
+|  0 |     0    |     0    |          0         |      0      |       0      |   0   |
+|  1 |     0    |     0    |          0         |      0      |       1      |   0   |
+|  2 |     0    |     0    |          0         |      1      |       0      |   0   |
+|  3 |     0    |     0    |          0         |      1      |       1      |   0   |
+|  4 |     0    |     0    |          1         |      0      |       0      |   0   |
+|  5 |     0    |     0    |          1         |      0      |       1      |   0   |
+|  6 |     0    |     0    |          1         |      1      |       0      |   0   |
+|  7 |     0    |     0    |          1         |      1      |       1      |   0   |
+|  8 |     0    |     1    |          0         |      0      |       0      |   0   |
+|  9 |     0    |     1    |          0         |      0      |       1      |   0   |
+| 10 |     0    |     1    |          0         |      1      |       0      |   0   |
+| 11 |     0    |     1    |          0         |      1      |       1      |   0   |
+| 12 |     0    |     1    |          1         |      0      |       0      |   0   |
+| 13 |     0    |     1    |          1         |      0      |       1      |   0   |
+| 14 |     0    |     1    |          1         |      1      |       0      |   0   |
+| 15 |     0    |     1    |          1         |      1      |       1      |   0   |
+| 16 |     1    |     0    |          0         |      0      |       0      |   0   |
+| 17 |     1    |     0    |          0         |      0      |       1      |   0   |
+| 18 |     1    |     0    |          0         |      1      |       0      |   0   |
+| 19 |     1    |     0    |          0         |      1      |       1      |   0   |
+| 20 |     1    |     0    |          1         |      0      |       0      |   0   |
+| 21 |     1    |     0    |          1         |      0      |       1      |   1   |
+| 22 |     1    |     0    |          1         |      1      |       0      |   0   |
+| 23 |     1    |     0    |          1         |      1      |       1      |   0   |
+| 24 |     1    |     1    |          0         |      0      |       0      |   0   |
+| 25 |     1    |     1    |          0         |      0      |       1      |   0   |
+| 26 |     1    |     1    |          0         |      1      |       0      |   0   |
+| 27 |     1    |     1    |          0         |      1      |       1      |   0   |
+| 28 |     1    |     1    |          1         |      0      |       0      |   1   |
+| 29 |     1    |     1    |          1         |      0      |       1      |   1   |
+| 30 |     1    |     1    |          1         |      1      |       0      |   0   |
+| 31 |     1    |     1    |          1         |      1      |       1      |   0   |
+
+            y = ACD'E + ABCD'
+            """
+            a, b, c, d, e = (is_recover, is_ioh, has_alerted, only_failures, ooh_recovery)
+            return (a and c and not d and e) or (a and b and c and not d) 
+
+        is_recover = monitor.all_better_now()
+        has_alerted = monitor.last_virtual_fail_count() >= self._limit
+        only_failures = self._only_failures
+        ooh_recovery = self._ooh_recovery
+        
+        is_type_success = check_type_success(is_recover, is_ioh, has_alerted, only_failures, ooh_recovery)
+        
+        def check_postpone():
+            # TODO: store in _ooh_failures
+            pass
+        
+        # sanity check: only alert or success can be true; never both
+        if is_type_alert and is_type_success:
+            self.alerter_logger.fatal("monitor %s sanity check: both alert and recover are True", monitor.name)
+        elif is_type_alert:
+            self.alerter_logger.debug("monitor %s has failed", monitor.name)
+            return AlertType.FAILURE
+        elif is_type_success:
+            self.alerter_logger.debug("monitor %s has recovered", monitor.name)
+            return AlertType.SUCCESS
+        else:
+            return AlertType.NONE
             
         virtual_failure_count = monitor.virtual_fail_count()
 
